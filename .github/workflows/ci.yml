@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build, start stack, run smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image tagged with commit SHA
+        run: docker build -t nexcell-app:${{ github.sha }} .
+
+      - name: Prepare .env for compose
+        run: cp .env.example .env
+
+      - name: Tag image for compose (so compose reuses the built image)
+        run: docker tag nexcell-app:${{ github.sha }} nexcell-app:test
+
+      - name: Start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for containers to report healthy..."
+          for i in {1..15}; do
+            if [ "$(docker inspect -f '{{.State.Health.Status}}' nexcell-devops-assessment-api-1 2>/dev/null)" = "healthy" ]; then
+              echo "API is healthy"
+              break
+            fi
+            echo "Not healthy yet, retrying ($i/15)..."
+            sleep 3
+          done
+
+      - name: Make smoke test executable
+        run: chmod +x smoke_test.sh
+
+      - name: Run smoke test
+        run: ./smoke_test.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Deploy to ECS (placeholder, OIDC)
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check AWS credentials are configured
+        id: check-creds
+        run: |
+          if [ -z "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No AWS_DEPLOY_ROLE_ARN secret configured — skipping deploy safely."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials via OIDC
+        if: steps.check-creds.outputs.skip == 'false'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - name: Deploy to ECS (placeholder)
+        if: steps.check-creds.outputs.skip == 'false'
+        run: |
+          echo "Would run: aws ecs update-service --cluster nexcell-prod --service api --force-new-deployment"
+          echo "This is a placeholder — real cluster/service names go here once infra exists."
+
+      - name: Skipped
+        if: steps.check-creds.outputs.skip == 'true'
+        run: echo "Deploy step skipped — no AWS credentials configured in repo secrets. This is expected for this assessment."
